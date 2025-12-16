@@ -1,0 +1,28 @@
+name: PDC Daily Monitor
+
+on:
+  schedule:
+    # Runs at 8:00 AM UTC (approx 3:00 AM EST) every day
+    - cron: '0 8 * * *'
+  workflow_dispatch: # Allows you to run it manually by clicking a button
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Scraper
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: python pdc_scraper.py
