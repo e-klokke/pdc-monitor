@@ -94,12 +94,27 @@ def get_google_alerts():
             print(f"Error google search '{q}': {e}")
 
 def get_ncaa_market():
-    """Fetches official NCAA job postings"""
+    """Fetches official NCAA job postings with 'Fundraising' filters"""
     print("Checking NCAA Market...")
+    
+    # Words that indicate this is a FUNDRAISING job, not a coaching job
+    IGNORE_TERMS = [
+        "fundraising", "donor", "gift", "advancement", "stewardship", 
+        "alumni", "philanthropy", "ticket sales", "annual fund"
+    ]
+    
     try:
         feed = feedparser.parse("https://ncaamarket.ncaa.org/jobs/?display=rss")
         for entry in feed.entries:
-            if "basketball" in entry.title.lower() or "development" in entry.title.lower():
+            title = entry.title.lower()
+            
+            # 1. Must be about Basketball or Player Development
+            is_relevant = "basketball" in title or "player development" in title
+            
+            # 2. MUST NOT be about Fundraising
+            is_fundraising = any(term in title for term in IGNORE_TERMS)
+            
+            if is_relevant and not is_fundraising:
                  found_opps.append({
                     "source": "NCAA Market",
                     "title": entry.title,
@@ -111,21 +126,35 @@ def get_ncaa_market():
         print(f"Error fetching NCAA: {e}")
 
 def get_college_confidential():
-    """Fetches High-Net-Worth parent discussions"""
+    """Fetches High-Net-Worth parent discussions (Filtered for Basketball)"""
     print("Checking College Confidential...")
+    
+    # Terms to SKIP (Other sports)
+    WRONG_SPORTS = ["football", "soccer", "baseball", "lacrosse", "rowing", "swim", "volleyball"]
+    
     try:
         rss_url = "https://talk.collegeconfidential.com/c/athletic-recruits.rss"
         feed = feedparser.parse(rss_url)
-        for entry in feed.entries[:10]:
-            category = "💰 High-Net-Worth Discussion"
-            # Simple logic: If it's in this forum, it's likely a wealthy parent
-            found_opps.append({
-                "source": "College Confidential",
-                "title": entry.title,
-                "url": entry.link,
-                "summary": category,
-                "type": "wealth"
-            })
+        for entry in feed.entries[:15]:
+            title = entry.title.lower()
+            
+            # Filter Logic:
+            # 1. Skip if it mentions another sport
+            if any(sport in title for sport in WRONG_SPORTS):
+                continue
+                
+            # 2. Keep if it mentions Basketball OR General Money/Prep School terms
+            is_basketball = "basketball" in title or "hoop" in title
+            is_wealth_signal = any(k in title for k in WEALTH_KEYWORDS)
+            
+            if is_basketball or is_wealth_signal:
+                found_opps.append({
+                    "source": "College Confidential",
+                    "title": entry.title,
+                    "url": entry.link,
+                    "summary": "💰 HNW/Recruiting Discussion",
+                    "type": "wealth"
+                })
     except Exception as e:
         print(f"Error fetching College Confidential: {e}")
 
