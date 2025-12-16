@@ -5,245 +5,168 @@ import os
 import urllib.parse
 from datetime import datetime, timedelta
 
-# --- CONFIGURATION: KEYWORD LISTS ---
+# --- CONFIGURATION ---
 
-# 1. Industry/Coaching Keywords (Finding Jobs & Openings)
+# 1. Industry/Coaching (Jobs)
 COACHING_KEYWORDS = [
     "Player Development", "Mental Performance", "Life Skills", 
     "Head Coach", "Assistant Coach", "Director of Operations", 
     "Basketball", "Athlete Development"
 ]
 
-# 2. Parent Pain Points (Finding "Emotional" Clients)
-PAIN_KEYWORDS = [
-    "quit", "confidence", "anxiety", "scared", "nervous", "toxic coach",
-    "unfair", "politics", "bench", "playing time", "struggling", "lost passion"
+# 2. Parent/Advisory (Clients)
+# We look for these words in the Google/Reddit results
+CLIENT_KEYWORDS = [
+    "son", "daughter", "kid", "child", "quit", "confidence", "anxiety", 
+    "toxic coach", "politics", "playing time", "recruiting", "prep school", 
+    "tuition", "financial aid", "boarding school", "is it worth it"
 ]
 
-# 3. High-Net-Worth/Advisory (Finding "Investment" Clients)
-WEALTH_KEYWORDS = [
-    "prep school", "tuition", "private school", "boarding school",
-    "consultant", "recruiting service", "showcase", "ivy league",
-    "financial aid", "investment", "is it worth it", "advisor"
-]
-
-# Get Webhook from Environment Variable
 SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL')
 
-# Master list to store all findings
 found_opps = []
 
 # --- HELPER FUNCTIONS ---
 
-def is_relevant(text, keyword_list):
-    """Returns True if any keyword from the list is in the text."""
-    if not text:
-        return False
-    text = text.lower()
-    return any(keyword.lower() in text for keyword in keyword_list)
+def is_recent(published_str):
+    """Checks if a date string is within the last 48 hours"""
+    try:
+        # Handling multiple date formats is tricky, so we do a "generous" check
+        # If parsing fails, we assume it's recent enough to show.
+        dt = datetime.strptime(published_str, "%a, %d %b %Y %H:%M:%S %z")
+        if datetime.now(dt.tzinfo) - dt > timedelta(hours=48):
+            return False
+    except:
+        return True # Default to showing it if we can't parse date
+    return True
 
-def get_hoopdirt_news():
-    """Fetches coaching news from HoopDirt (Industry Standard)"""
+def get_hoopdirt():
+    """Fetches Coaching News"""
     print("Checking HoopDirt...")
     try:
         feed = feedparser.parse("https://hoopdirt.com/feed/")
-        for entry in feed.entries:
-            published = datetime.strptime(entry.published, "%a, %d %b %Y %H:%M:%S %z")
-            if datetime.now(published.tzinfo) - published > timedelta(hours=24):
-                continue
-            
-            found_opps.append({
-                "source": "HoopDirt",
-                "title": entry.title,
-                "url": entry.link,
-                "summary": "🏀 Coaching Move / Industry Rumor",
-                "type": "industry"
-            })
-    except Exception as e:
-        print(f"Error fetching HoopDirt: {e}")
-
-def get_google_alerts():
-    """Fetches Google News for Vacancies and Wealth Partners"""
-    print("Checking Google News...")
-    
-    # 1. Vacancy Search
-    job_query = "Basketball Coach (Hiring OR Wanted OR Vacancy OR 'Player Development')"
-    
-    # 2. Wealth Partner Search (Financial Advisors talking about athletes)
-    partner_query = "(Wealth Management OR Financial Advisor) AND (NIL OR Student Athletes)"
-    
-    queries = [
-        (job_query, "📰 Job Vacancy", "industry"),
-        (partner_query, "🤝 Potential Wealth Partner", "partner")
-    ]
-
-    for q, summary, type_ in queries:
-        encoded = urllib.parse.quote(q)
-        rss_url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
-        try:
-            feed = feedparser.parse(rss_url)
-            for entry in feed.entries[:5]: # Top 5 only
+        for entry in feed.entries[:10]:
+            if is_recent(entry.published):
                 found_opps.append({
-                    "source": "Google News",
+                    "source": "HoopDirt",
                     "title": entry.title,
                     "url": entry.link,
-                    "summary": summary,
+                    "summary": "🏀 Industry News",
+                    "type": "industry"
+                })
+    except Exception as e:
+        print(f"Error HoopDirt: {e}")
+
+def get_google_smart_search():
+    """
+    The Master Search: Queries Google News for both Jobs AND Parent Discussions.
+    This bypasses Reddit's anti-bot blocking by letting Google do the work.
+    """
+    print("Checking Google Smart Search...")
+    
+    searches = [
+        # 1. Finding Jobs
+        ("Basketball Coach (Hiring OR Vacancy OR 'Player Development')", "📰 Job Vacancy", "industry"),
+        
+        # 2. Finding Wealth Partners (Financial Advisors)
+        ("(Wealth Management OR Financial Advisor) AND (NIL OR Student Athletes)", "🤝 Potential Partner", "partner"),
+        
+        # 3. Finding Parents (The "Backdoor" Reddit Search)
+        # This asks Google to find Reddit threads about basketball parents
+        ("site:reddit.com (basketball OR youth sports) AND (son OR daughter) AND (quit OR confidence OR coach)", "❤️ Parent Discussion", "pain"),
+        
+        # 4. Finding High-Net-Worth Parents (Prep Schools)
+        ("site:collegeconfidential.com OR site:reddit.com (prep school OR tuition OR boarding school) basketball", "💰 HNW Lead", "wealth")
+    ]
+
+    for query, label, type_ in searches:
+        try:
+            encoded = urllib.parse.quote(query)
+            rss_url = f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
+            feed = feedparser.parse(rss_url)
+            
+            for entry in feed.entries[:4]: # Top 4 per category to avoid spam
+                found_opps.append({
+                    "source": "Google Alert",
+                    "title": entry.title,
+                    "url": entry.link,
+                    "summary": label,
                     "type": type_
                 })
         except Exception as e:
-            print(f"Error google search '{q}': {e}")
+            print(f"Error Google Search '{query}': {e}")
 
 def get_ncaa_market():
-    """Fetches official NCAA job postings with 'Fundraising' filters"""
+    """Fetches NCAA Jobs (Filtering out Fundraising)"""
     print("Checking NCAA Market...")
-    
-    # Words that indicate this is a FUNDRAISING job, not a coaching job
-    IGNORE_TERMS = [
-        "fundraising", "donor", "gift", "advancement", "stewardship", 
-        "alumni", "philanthropy", "ticket sales", "annual fund"
-    ]
-    
+    IGNORE = ["fundraising", "donor", "gift", "advancement", "annual fund"]
     try:
         feed = feedparser.parse("https://ncaamarket.ncaa.org/jobs/?display=rss")
         for entry in feed.entries:
             title = entry.title.lower()
-            
-            # 1. Must be about Basketball or Player Development
-            is_relevant = "basketball" in title or "player development" in title
-            
-            # 2. MUST NOT be about Fundraising
-            is_fundraising = any(term in title for term in IGNORE_TERMS)
-            
-            if is_relevant and not is_fundraising:
-                 found_opps.append({
-                    "source": "NCAA Market",
-                    "title": entry.title,
-                    "url": entry.link,
-                    "summary": "🎓 Collegiate Role",
-                    "type": "industry"
-                })
+            if "basketball" in title or "player development" in title:
+                if not any(x in title for x in IGNORE):
+                    found_opps.append({
+                        "source": "NCAA Market",
+                        "title": entry.title,
+                        "url": entry.link,
+                        "summary": "🎓 Collegiate Role",
+                        "type": "industry"
+                    })
     except Exception as e:
-        print(f"Error fetching NCAA: {e}")
-
-def get_college_confidential():
-    """Fetches High-Net-Worth parent discussions (Filtered for Basketball)"""
-    print("Checking College Confidential...")
-    
-    # Terms to SKIP (Other sports)
-    WRONG_SPORTS = ["football", "soccer", "baseball", "lacrosse", "rowing", "swim", "volleyball"]
-    
-    try:
-        rss_url = "https://talk.collegeconfidential.com/c/athletic-recruits.rss"
-        feed = feedparser.parse(rss_url)
-        for entry in feed.entries[:15]:
-            title = entry.title.lower()
-            
-            # Filter Logic:
-            # 1. Skip if it mentions another sport
-            if any(sport in title for sport in WRONG_SPORTS):
-                continue
-                
-            # 2. Keep if it mentions Basketball OR General Money/Prep School terms
-            is_basketball = "basketball" in title or "hoop" in title
-            is_wealth_signal = any(k in title for k in WEALTH_KEYWORDS)
-            
-            if is_basketball or is_wealth_signal:
-                found_opps.append({
-                    "source": "College Confidential",
-                    "title": entry.title,
-                    "url": entry.link,
-                    "summary": "💰 HNW/Recruiting Discussion",
-                    "type": "wealth"
-                })
-    except Exception as e:
-        print(f"Error fetching College Confidential: {e}")
-
-def get_reddit_monitor():
-    """Scans Reddit for Parents (Pain Points & Advisory Needs)"""
-    print("Checking Reddit...")
-    subreddits = ["BasketballTips", "YouthSports", "Parenting", "basketballcoach"]
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
-    
-    for sub in subreddits:
-        try:
-            url = f"https://www.reddit.com/r/{sub}/new.json?limit=25"
-            r = requests.get(url, headers=headers)
-            data = r.json()
-            
-            for post in data['data']['children']:
-                p = post['data']
-                full_text = f"{p['title']} {p.get('selftext', '')}".lower()
-                
-                # Context: Is this a parent talking about a child?
-                is_parent = any(k in full_text for k in ["son", "daughter", "kid", "child", "12yo", "13yo", "14yo", "hs", "my boy"])
-                
-                if is_parent:
-                    if is_relevant(full_text, WEALTH_KEYWORDS):
-                        found_opps.append({
-                            "source": f"Reddit (r/{sub})",
-                            "title": p['title'],
-                            "url": f"https://www.reddit.com{p['permalink']}",
-                            "summary": "💰 Investment/Advisory Question",
-                            "type": "wealth"
-                        })
-                    elif is_relevant(full_text, PAIN_KEYWORDS):
-                        found_opps.append({
-                            "source": f"Reddit (r/{sub})",
-                            "title": p['title'],
-                            "url": f"https://www.reddit.com{p['permalink']}",
-                            "summary": "❤️ Parent Pain Point (Confidence/Politics)",
-                            "type": "pain"
-                        })
-        except Exception as e:
-            print(f"Error fetching r/{sub}: {e}")
+        print(f"Error NCAA: {e}")
 
 def send_slack_alert():
-    if not found_opps:
-        print("No opportunities found today.")
-        return
-
-    # Deduplicate by URL
+    # DEDUPLICATE: Remove results with the same URL
     unique_opps = {opp['url']: opp for opp in found_opps}.values()
-    print(f"Found {len(unique_opps)} opportunities.")
+    count = len(unique_opps)
     
-    blocks = [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": f"🚀 PDC Daily Monitor: {len(unique_opps)} Leads"}
-        },
-        {"type": "divider"}
-    ]
+    print(f"Total Unique Opps Found: {count}")
 
-    # Limit to top 15 to prevent Slack errors
-    for opp in list(unique_opps)[:15]:
-        # Dynamic Emoji based on type
-        emoji = "🏀" # default
-        if opp['type'] == "wealth": emoji = "💰"
-        elif opp['type'] == "pain": emoji = "❤️"
-        elif opp['type'] == "partner": emoji = "🤝"
-        elif opp['type'] == "industry": emoji = "📰"
+    if count == 0:
+        # DEBUG MESSAGE: If nothing found, send a "Heartbeat" so we know it ran.
+        payload = {
+            "blocks": [{
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "✅ *PDC Monitor Ran:* No new matches found this cycle."}
+            }]
+        }
+    else:
+        blocks = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": f"🚀 PDC Monitor: {count} Leads"}
+            },
+            {"type": "divider"}
+        ]
 
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"{emoji} *{opp['source']}*: <{opp['url']}|{opp['title']}>\n_{opp['summary']}_"
-            }
-        })
+        # Sort: Wealth/Pain first, then Jobs
+        sorted_opps = sorted(unique_opps, key=lambda x: 0 if x['type'] in ['wealth', 'pain'] else 1)
 
-    payload = {"blocks": blocks}
-    
+        for opp in list(sorted_opps)[:15]: # Max 15 to fit in Slack
+            emoji = "🏀"
+            if opp['type'] == "wealth": emoji = "💰"
+            elif opp['type'] == "pain": emoji = "❤️"
+            elif opp['type'] == "partner": emoji = "🤝"
+            
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"{emoji} *{opp['summary']}*: <{opp['url']}|{opp['title']}>"
+                }
+            })
+            
+        payload = {"blocks": blocks}
+
     if SLACK_WEBHOOK_URL:
         requests.post(SLACK_WEBHOOK_URL, json=payload)
     else:
-        print("No Webhook set. JSON Output:")
+        print("No Webhook set. Outputting JSON locally.")
         print(json.dumps(payload, indent=2))
 
-# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    get_hoopdirt_news()
-    get_google_alerts()
+    get_hoopdirt()
+    get_google_smart_search()
     get_ncaa_market()
-    get_college_confidential()
-    get_reddit_monitor()
     send_slack_alert()
